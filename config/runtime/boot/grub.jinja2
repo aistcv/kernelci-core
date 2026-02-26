@@ -1,7 +1,11 @@
 - deploy:
     kernel:
       url: '{{ node.artifacts.kernel }}'
-      image_arg: -kernel {kernel} -serial stdio --append "console=ttyS0"
+{%- set cmdline = 'console=ttyS0' %}
+{%- if cmdline_append %}
+{%-   set cmdline = cmdline + ' ' + cmdline_append %}
+{%- endif %}
+      image_arg: -kernel {kernel} -serial stdio --append "{{ cmdline }}"
       type: {{ node.data.kernel_type }}
 {%- if boot_commands == 'nfs' %}
     nfsrootfs:
