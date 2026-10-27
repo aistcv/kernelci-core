@@ -3,8 +3,12 @@
 
 import json
 import os
+import shlex
+import subprocess
 import sys
 import types
+
+import pytest
 
 from kernelci.kbuild import KBuild
 
@@ -19,6 +23,7 @@ def _kbuild(tmp_path, compiler="clang-21", arch="x86_64"):
     kbuild._defconfig = "defconfig"
     kbuild._fragments = []
     kbuild._kconfig_adds = []
+    kbuild._make_variables = {}
     kbuild._config_full = ""
     kbuild._backend = "tuxmake"
     kbuild._dtbs_check = True
@@ -286,6 +291,142 @@ class TestKselftestFlag:
     def test_reload_keeps_disabled_for_dtbs_check(self, tmp_path, monkeypatch):
         kbuild = _kbuild_from_json(tmp_path, monkeypatch, dtbs_check=True)
         assert kbuild._kselftest is False
+
+
+class TestMakeVariables:
+    @pytest.mark.parametrize(
+        "kselftest,dtbs_check,targets",
+        [
+            (
+                False,
+                False,
+                ["kernel", "modules", "dtbs", "dtbs-legacy", "perf"],
+            ),
+            (True, False, ["kernel", "modules", "dtbs", "dtbs-legacy", "perf"]),
+            (False, True, ["dtbs_check"]),
+        ],
+    )
+    def test_variables_follow_options_in_every_invocation(
+        self, tmp_path, monkeypatch, kselftest, dtbs_check, targets
+    ):
+        kbuild = _kbuild(tmp_path, compiler="gcc-15", arch="arm64")
+        kbuild._make_variables = {"CORESIGHT": "1"}
+        kbuild._dtbs_check = dtbs_check
+        kbuild._kselftest = kselftest
+        kbuild._extra_targets = ["perf"]
+        kbuild._fetch_firmware = lambda: None
+        monkeypatch.setitem(sys.modules, "tuxmake", None)
+
+        kbuild._build_with_tuxmake()
+
+        commands = [
+            shlex.split(step.split(" > >(", 1)[0])
+            for step in kbuild._steps
+            if step.startswith("tuxmake --runtime=null")
+        ]
+        assert len(commands) == 1 + int(kselftest)
+        expected_targets = [targets] + ([["kselftest"]] if kselftest else [])
+        for arguments, expected in zip(commands, expected_targets):
+            position = arguments.index("CORESIGHT=1")
+            # TuxMake does not accept options interleaved with positional
+            # make assignments and targets, including --build-dir.
+            assert all(arg.startswith("--") for arg in arguments[1:position])
+            assert arguments[position + 1 :] == expected
+
+    def test_values_remain_single_literal_arguments(self, tmp_path):
+        kbuild = _kbuild(tmp_path)
+        value = "-I/a path 'quoted' $(printf injected); `id`"
+        kbuild._make_variables = {"EXTRA_CFLAGS": value, "CORESIGHT": 1}
+
+        arguments = shlex.split(" ".join(kbuild._tuxmake_make_variables()))
+
+        assert arguments == [f"EXTRA_CFLAGS={value}", "CORESIGHT=1"]
+
+    @pytest.mark.parametrize("name", ["--shell", "A=B", "A B", "", 1])
+    def test_invalid_names_are_rejected(self, tmp_path, name):
+        kbuild = _kbuild(tmp_path)
+        kbuild._make_variables = {name: "1"}
+
+        with pytest.raises(ValueError, match="Invalid make variable name"):
+            kbuild._tuxmake_make_variables()
+
+    @pytest.mark.parametrize("value", [True, None, [], {}, 1.5])
+    def test_non_string_or_integer_values_are_rejected(self, tmp_path, value):
+        kbuild = _kbuild(tmp_path)
+        kbuild._make_variables = {"CORESIGHT": value}
+
+        with pytest.raises(ValueError, match="must be a string or integer"):
+            kbuild._tuxmake_make_variables()
+
+    def test_values_with_equals_are_rejected_for_tuxmake_cli(self, tmp_path):
+        kbuild = _kbuild(tmp_path)
+        kbuild._make_variables = {"EXTRA_CFLAGS": "-DNAME=value"}
+
+        with pytest.raises(ValueError, match="cannot contain '='"):
+            kbuild._tuxmake_make_variables()
+
+    def test_requires_mapping(self, tmp_path):
+        kbuild = _kbuild(tmp_path)
+        kbuild._make_variables = ["CORESIGHT=1"]
+
+        with pytest.raises(
+            ValueError, match="make_variables must be a mapping"
+        ):
+            kbuild._tuxmake_make_variables()
+
+    @pytest.mark.parametrize(
+        "variables,expected",
+        [
+            ({}, ["net", "timers", "mm"]),
+            ({"TARGETS": "net timers"}, ["net", "timers"]),
+            ({"SKIP_TARGETS": "net mm"}, ["timers", "bpf"]),
+            (
+                {"TARGETS": "net timers mm", "SKIP_TARGETS": "net mm"},
+                ["timers"],
+            ),
+        ],
+    )
+    def test_expected_kselftest_suites_use_build_variables(
+        self, tmp_path, variables, expected
+    ):
+        kbuild = _kbuild(tmp_path)
+        kbuild._make_variables = variables
+        selftests = tmp_path / "linux/tools/testing/selftests"
+        selftests.mkdir(parents=True)
+        # Model the kernel's selection logic, including command-line
+        # overrides, without compiling any suites.
+        (selftests / "Makefile").write_text(
+            "TARGETS += net timers mm bpf\n"
+            "SKIP_TARGETS ?= bpf\n"
+            "override TARGETS := $(filter-out $(SKIP_TARGETS),$(TARGETS))\n"
+        )
+        kbuild._build_kselftest_tuxmake("defconfig", [], "kernel_build")
+        command = next(
+            step for step in kbuild._steps if step.startswith("make -sC")
+        )
+
+        subprocess.run(["sh", "-c", command], cwd=kbuild._srcdir, check=True)
+
+        assert (
+            tmp_path / "artifacts/kselftest_targets.txt"
+        ).read_text().split() == expected
+
+    def test_reload_preserves_variables(self, tmp_path, monkeypatch):
+        kbuild = _kbuild_from_json(
+            tmp_path, monkeypatch, make_variables={"CORESIGHT": "1"}
+        )
+        assert kbuild._make_variables == {"CORESIGHT": "1"}
+
+    def test_old_serialized_build_defaults_to_no_variables(
+        self, tmp_path, monkeypatch
+    ):
+        _kbuild_from_json(tmp_path, monkeypatch)
+        path = tmp_path / "kbuild.json"
+        data = json.loads(path.read_text())
+        del data["_make_variables"]
+        path.write_text(json.dumps(data))
+
+        assert KBuild.from_json(str(path))._make_variables == {}
 
 
 class FakeStorage:

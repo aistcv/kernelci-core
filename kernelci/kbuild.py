@@ -23,12 +23,15 @@ Available kbuild parameters:
 - dtbs_check: run "make dtbs_check" ONLY, it is actually a separate test
 - kselftest: false - do not build kselftest
 - extra_targets: list of additional tuxmake targets (e.g. ['binrpm-pkg'])
+- make_variables: extra make variables for tuxmake (e.g. {'CORESIGHT': '1'});
+  values must be strings or integers and cannot contain '=' (a CLI limitation)
 """
 
 import concurrent.futures
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -221,6 +224,7 @@ class KBuild:
                 not self._dtbs_check and params.get("kselftest") != "disable"
             )
             self._extra_targets = params.get("extra_targets", [])
+            self._make_variables = params.get("make_variables", {})
             self._apijobname = jobname
             self._steps = []
             self._artifacts = []
@@ -279,6 +283,7 @@ class KBuild:
             self._kselftest = jsonobj["kselftest"]
             self._coverage = jsonobj.get("coverage", False)
             self._extra_targets = jsonobj.get("extra_targets", [])
+            self._make_variables = jsonobj.get("make_variables", {})
             return
         raise ValueError("No valid arguments provided")
 
@@ -898,6 +903,7 @@ trap 'case $stage in
         )
         if self._kselftest:
             cmd_parts.append(f"--build-dir={kernel_build_dir}")
+        cmd_parts.extend(self._tuxmake_make_variables())
 
         # Build targets depend on mode. kselftest is built in a separate
         # tuxmake invocation below so a kselftest build failure cannot
@@ -1002,6 +1008,28 @@ trap 'case $stage in
                 )
         return parts
 
+    def _tuxmake_make_variables(self):
+        """Quote make assignments, which must follow all TuxMake options."""
+        parts = []
+        if not isinstance(self._make_variables, dict):
+            raise ValueError("make_variables must be a mapping")
+        for name, value in self._make_variables.items():
+            if not isinstance(name, str) or not re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_]*", name
+            ):
+                raise ValueError(f"Invalid make variable name: {name!r}")
+            if isinstance(value, bool) or not isinstance(value, (str, int)):
+                raise ValueError(
+                    f"Make variable {name!r} must be a string or integer"
+                )
+            if "=" in str(value):
+                raise ValueError(
+                    f"Make variable {name!r} cannot contain '=' in its value "
+                    "with the TuxMake CLI"
+                )
+            parts.append(shlex.quote(f"{name}={value}"))
+        return parts
+
     def _build_kselftest_tuxmake(
         self, defconfig, extra_defconfigs, kernel_build_dir
     ):
@@ -1023,6 +1051,8 @@ trap 'case $stage in
             kselftest_out, defconfig, extra_defconfigs
         )
         cmd_parts.append(f"--build-dir={kernel_build_dir}")
+        make_variables = self._tuxmake_make_variables()
+        cmd_parts.extend(make_variables)
         cmd_parts.append("kselftest")
         kselftest_cmd = " ".join(cmd_parts) + REDIR.format(
             self._af_dir + "/build_kselftest.log",
@@ -1050,9 +1080,11 @@ trap 'case $stage in
         # SKIP_TARGETS). This is the 'expected' set that _submit() diffs the
         # built set against to mark each suite's build pass/fail. ARCH is
         # already exported earlier in the build script, so SKIP_TARGETS is
-        # resolved for the target arch.
+        # resolved for the target arch. Preserve explicit make variables
+        # so TARGETS and SKIP_TARGETS match the actual kselftest build.
         self.addcmd(
             "make -sC tools/testing/selftests --no-print-directory "
+            f"{' '.join(make_variables)} "
             "--eval='__kci_targets: ; @echo $(TARGETS)' __kci_targets "
             f"> {self._af_dir}/kselftest_targets.txt 2>/dev/null || true",
             False,
