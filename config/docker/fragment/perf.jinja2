@@ -40,4 +40,9 @@ RUN target_triplet="$(dpkg-architecture {% if sub_arch %}-a{{ sub_arch }} {% end
     install -D -m 644 /tmp/opencsd/LICENSE /usr/share/doc/opencsd/LICENSE && \
     printf '%s\n' "OpenCSD ${opencsd_version}" "Source SHA256: ${opencsd_sha256}" \
         > /usr/share/doc/opencsd/build-info && \
+    install -d "/opt/kernelci/perf-runtime/usr/lib/${target_triplet}" \
+        /opt/kernelci/perf-runtime/usr/share/doc && \
+    cp -a /usr/lib/"${target_triplet}"/libopencsd*.so.* \
+        "/opt/kernelci/perf-runtime/usr/lib/${target_triplet}/" && \
+    cp -a /usr/share/doc/opencsd /opt/kernelci/perf-runtime/usr/share/doc/ && \
     rm -rf /tmp/opencsd
