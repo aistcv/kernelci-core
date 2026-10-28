@@ -80,6 +80,40 @@ def test_fastboot_docker_image_is_optional(docker_image):
         assert "docker" not in fastboot_boot
 
 
+@pytest.mark.parametrize("artifact", ["perf_tar_xz", "perf_tar_gz"])
+def test_perf_action_uses_build_artifact_and_installs_runtime_dependencies(
+    artifact,
+):
+    template_dir = Path(__file__).parents[1] / "config" / "runtime"
+    template = Environment(loader=FileSystemLoader(template_dir)).get_template(
+        "tests/perf.jinja2"
+    )
+    url = "https://example.com/perf.tar.xz"
+    actions = yaml.safe_load(
+        template.render(
+            node={"name": "perf", "artifacts": {artifact: url}},
+            test_timeout=30,
+        )
+    )
+    definition = actions[0]["test"]["definitions"][0]
+    assert definition["path"] == "automated/linux/perf/perf.yaml"
+    assert definition["parameters"] == {
+        "TESTPROG_URL": url,
+        "SKIP_INSTALL": "false",
+        "PARALLEL_TESTS": "false",
+    }
+
+
+def test_perf_action_rejects_missing_perf_artifact():
+    template_dir = Path(__file__).parents[1] / "config" / "runtime"
+    environment = Environment(loader=FileSystemLoader(template_dir))
+    environment.globals.update(kernelci.runtime.Runtime._get_jinja2_functions())
+    template = environment.get_template("tests/perf.jinja2")
+
+    with pytest.raises(TemplateRuntimeError, match="requires a perf"):
+        template.render(node={"name": "perf", "artifacts": {}}, test_timeout=30)
+
+
 class _FakeResponse:
     def __init__(self, payload, status_code=200, text=""):
         """Initialize a fake response with payload and status."""
