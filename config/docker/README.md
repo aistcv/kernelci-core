@@ -96,5 +96,8 @@ tuxmake --runtime=null --target-arch=arm64 --toolchain=gcc-15 CORESIGHT=1 perf
 To update OpenCSD, change `opencsd_version` and `opencsd_sha256` together in
 `fragment/perf.jinja2`, then rebuild the image.
 
-The target rootfs must supply matching OpenCSD runtime libraries and other
-enabled perf dependencies; `perf.tar.xz` does not bundle them.
+KernelCI stages the image's OpenCSD runtime libraries before the build so
+TuxMake includes them in `perf.tar.xz`. Use a perf test definition with
+prebuilt-archive support to install other runtime packages on the shared rootfs
+and load the bundled libraries. With `SKIP_INSTALL=true`, those packages must
+already be installed.

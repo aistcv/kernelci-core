@@ -29,6 +29,7 @@ import concurrent.futures
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -57,6 +58,9 @@ LATEST_LTS_MINOR = 12
 # Prefix marking a fragment entry as a kernel make target generating
 # config (e.g. 'make:kselftest-merge') rather than a config symbol.
 MAKE_FRAGMENT_PREFIX = "make:"
+
+# Optional target libraries staged by the perf builder image.
+PERF_RUNTIME_DIR = "/opt/kernelci/perf-runtime"
 
 DTBS_DISABLED = {
     "i386": True,
@@ -896,9 +900,6 @@ trap 'case $stage in
         cmd_parts = self._tuxmake_base(
             self._af_dir, defconfig, extra_defconfigs
         )
-        if self._kselftest:
-            cmd_parts.append(f"--build-dir={kernel_build_dir}")
-
         # Build targets depend on mode. kselftest is built in a separate
         # tuxmake invocation below so a kselftest build failure cannot
         # fail the kernel build.
@@ -910,6 +911,8 @@ trap 'case $stage in
                 targets.extend(["dtbs", "dtbs-legacy"])
             if self._extra_targets:
                 targets.extend(self._extra_targets)
+        if self._kselftest or "perf" in targets:
+            cmd_parts.append(f"--build-dir={shlex.quote(kernel_build_dir)}")
         cmd_parts.append(" ".join(targets))
         print(f"[_build_with_tuxmake] Building targets: {' '.join(targets)}")
 
@@ -940,6 +943,8 @@ trap 'case $stage in
             )
         if compiler_bin:
             self.addcmd(f"{compiler_bin} --version || true")
+        if "perf" in targets:
+            self._stage_perf_runtime(kernel_build_dir)
         self.addcmd("stage=1")  # stage 1 failure is build failure
         self.addcmd(tuxmake_cmd)
         self.addcmd("stage=2")
@@ -972,6 +977,17 @@ trap 'case $stage in
             self._build_kselftest_tuxmake(
                 defconfig, extra_defconfigs, kernel_build_dir
             )
+
+    def _stage_perf_runtime(self, build_dir):
+        """Stage target libraries for TuxMake to include in its perf archive."""
+        runtime_dir = shlex.quote(PERF_RUNTIME_DIR)
+        install_dir = shlex.quote(os.path.join(build_dir, "perf-install"))
+        # Do not retain files from an earlier build or runtime payload.
+        self.addcmd(f"rm -rf -- {install_dir}")
+        self.addcmd(f"if [ -d {runtime_dir} ]; then")
+        self.addcmd(f"mkdir -p {install_dir}")
+        self.addcmd(f"cp -a {runtime_dir}/. {install_dir}/")
+        self.addcmd("fi")
 
     def _tuxmake_base(self, output_dir, defconfig, extra_defconfigs):
         """Build the common tuxmake argument list for an invocation."""
