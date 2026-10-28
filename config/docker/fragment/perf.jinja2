@@ -17,3 +17,27 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     llvm \
     pkg-config \
     zlib1g-dev{{ pkgarch }}
+
+# Build OpenCSD once per image, with headers and libraries for the target arch.
+ARG opencsd_version=1.8.3
+ARG opencsd_sha256=6516cdad1e6e6cfb4376e986794976553f3c8e93adfd3b7b00ccded0f301674d
+RUN target_triplet="$(dpkg-architecture {% if sub_arch %}-a{{ sub_arch }} {% endif %}-qDEB_HOST_GNU_TYPE)" && \
+    cross_compile="{% if sub_arch %}${target_triplet}-{% endif %}" && \
+    gcc_version="$("${cross_compile}gcc" -dumpversion)" && \
+    apt-get update && apt-get install --no-install-recommends -y \
+        "g++-${gcc_version}{% if sub_arch %}-${target_triplet}{% endif %}" && \
+    mkdir /tmp/opencsd && \
+    wget -q -O /tmp/opencsd/opencsd.tar.gz \
+        "https://github.com/Linaro/OpenCSD/archive/refs/tags/v${opencsd_version}.tar.gz" && \
+    echo "${opencsd_sha256}  /tmp/opencsd/opencsd.tar.gz" | sha256sum --check - && \
+    tar -xzf /tmp/opencsd/opencsd.tar.gz -C /tmp/opencsd --strip-components=1 && \
+    make -j"$(nproc)" -C /tmp/opencsd/decoder/build/linux \
+        CROSS_COMPILE="${cross_compile}" \
+        MASTER_CXX="${cross_compile}g++-${gcc_version}" \
+        MASTER_LINKER="${cross_compile}g++-${gcc_version}" \
+        INSTALL_BIN_DIR=/tmp/opencsd/bin \
+        PREFIX=/usr LIB_PATH="lib/${target_triplet}" install && \
+    install -D -m 644 /tmp/opencsd/LICENSE /usr/share/doc/opencsd/LICENSE && \
+    printf '%s\n' "OpenCSD ${opencsd_version}" "Source SHA256: ${opencsd_sha256}" \
+        > /usr/share/doc/opencsd/build-info && \
+    rm -rf /tmp/opencsd

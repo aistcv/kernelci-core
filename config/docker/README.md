@@ -80,6 +80,21 @@ Build the `kernelci` image with a particular revision using `--build-arg`:
 
 ## Perf build dependencies
 
+The `perf` fragment adds target libraries, including libdw for DWARF unwinding,
+and builds OpenCSD 1.8.3 once per image:
+
 ```sh
 ./kci docker build gcc-15 perf kernelci --arch=arm64 --prefix=my-stuff/
 ```
+
+From the kernel source directory inside the image, build perf with CoreSight:
+
+```sh
+tuxmake --runtime=null --target-arch=arm64 --toolchain=gcc-15 CORESIGHT=1 perf
+```
+
+To update OpenCSD, change `opencsd_version` and `opencsd_sha256` together in
+`fragment/perf.jinja2`, then rebuild the image.
+
+The target rootfs must supply matching OpenCSD runtime libraries and other
+enabled perf dependencies; `perf.tar.xz` does not bundle them.
